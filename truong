@@ -1,0 +1,525 @@
+
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<title>Flappy Dragon — Final Playable</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root { --icon-size: 32px; } /* ⇐ Kích thước emoji rồng (28–40px tuỳ bạn) */
+
+  html, body { height: 100%; margin: 0; }
+  body {
+    overflow: hidden;
+    background: linear-gradient(180deg, #78d5ff 0%, #c3f1ff 60%, #f0f9ff 100%);
+    font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+  }
+
+  /* Canvas nằm dưới emoji */
+  canvas { display: block; position: relative; z-index: 1; }
+
+  /* Emoji rồng: luôn hiển thị, không phụ thuộc ảnh */
+  #dragonEmoji {
+    position: absolute; left: 0; top: 0;
+    font-size: var(--icon-size); line-height: 1;
+    font-family: "Segoe UI Emoji","Apple Color Emoji","Noto Color Emoji",system-ui,sans-serif;
+    transform-origin: 50% 50%;
+    pointer-events: none;
+    filter: drop-shadow(0 6px 12px rgba(0,0,0,.25));
+    will-change: transform;
+    z-index: 10;
+  }
+
+  /* Glow khi Power Mode bật */
+  #powerGlow {
+    position: absolute; left: 0; top: 0;
+    width: calc(var(--icon-size) * 2.2); height: calc(var(--icon-size) * 2.2);
+    transform: translate(-50%, -50%);
+    border-radius: 50%;
+    pointer-events: none;
+    display: none;
+    background: radial-gradient(closest-side, rgba(255, 215, 0, 0.65), rgba(255,215,0,0.0));
+    filter: blur(2px);
+    z-index: 9;
+  }
+
+  /* Hướng dẫn */
+  .hud {
+    position: fixed; left: 12px; bottom: 12px; font-size: 13px;
+    color: #0b3a52; background: rgba(255,255,255,0.82);
+    border: 1px solid rgba(0,0,0,0.12); padding: 8px 10px; border-radius: 10px;
+    box-shadow: 0 6px 16px rgba(0,0,0,0.12); backdrop-filter: blur(3px);
+    z-index: 20;
+  }
+  .hud kbd { background:#0b3a52; color:#fff; padding:2px 6px; border-radius:5px; border:1px solid #072636; font-weight:600; }
+
+  /* Nút điều khiển trên màn hình (nếu phím không nhận) */
+  .ctrl {
+    position: fixed; right: 12px; bottom: 12px; display: grid; gap: 6px;
+    z-index: 20;
+  }
+  .ctrl button {
+    padding: 8px 10px; border-radius: 8px; border: 1px solid #0b3a52;
+    background: #0b3a52; color: #fff; font-weight: 600; cursor: pointer;
+    box-shadow: 0 6px 12px rgba(0,0,0,.15);
+  }
+  .ctrl button.secondary { background: #2a7bd8; border-color: #1f58a4; }
+  .ctrl button.ghost { background: #fff; color: #0b3a52; border-color: #8fb2c1; }
+
+  /* Overlay thông báo lỗi nếu có */
+  .error {
+    position: fixed; top: 8px; right: 8px; max-width: 50vw; z-index: 30;
+    background: #ffe6e6; color: #9c1c1c; border: 1px solid #d08;
+    padding: 8px 10px; border-radius: 8px; font-size: 12px; display: none;
+  }
+</style>
+</head>
+<body tabindex="0">
+<canvas id="c"></canvas>
+
+<!-- Emoji rồng -->
+<div id="dragonEmoji" aria-label="Rồng" role="img">🐉</div>
+<!-- Glow Power -->
+<div id="powerGlow"></div>
+
+<!-- HUD hướng dẫn -->
+<div class="hud">
+  <strong>Flappy Dragon</strong> — <kbd>Space</kbd>/<kbd>↑</kbd> bay • <kbd>F</kbd> phun lửa phá bom •
+  <kbd>Enter</kbd> bắt đầu/chơi lại • <kbd>P</kbd> tạm dừng
+</div>
+
+<!-- Nút điều khiển (nếu phím không hoạt động) -->
+<div class="ctrl">
+  <button id="btnStart" class="ghost">Start / Restart</button>
+  <button id="btnFlap" class="secondary">Flap</button>
+  <button id="btnFire">Fire</button>
+  <button id="btnPause" class="ghost">Pause / Resume</button>
+</div>
+
+<div id="err" class="error"></div>
+
+<script>
+(() => {
+  // ===== DOM =====
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d');
+  const emojiEl = document.getElementById('dragonEmoji');
+  const glowEl  = document.getElementById('powerGlow');
+  const errEl   = document.getElementById('err');
+
+  const btnStart = document.getElementById('btnStart');
+  const btnFlap  = document.getElementById('btnFlap');
+  const btnFire  = document.getElementById('btnFire');
+  const btnPause = document.getElementById('btnPause');
+
+  // Bảo đảm nhận phím trong iframe/editor
+  document.body.focus();
+
+  // ===== Canvas size =====
+  function resize() {
+    canvas.width = window.innerWidth;
+    canvas.height = window.innerHeight;
+  }
+  window.addEventListener('resize', resize); resize();
+
+  // ===== Config tổng hợp =====
+  const CFG = {
+    gravity: 1800, flapImpulse: 520,
+    pipeSpeed: 170, pipeGap: 160, pipeWidth: 72, pipeInterval: 1.05,
+    groundH: 60,              // đất thấp → vùng bay rộng
+    topSafeMargin: 8,         // trần an toàn (không chết)
+
+    osc: { ampMin: 22, ampMax: 58, speedMin: 0.9, speedMax: 2.2, driftMax: 0.45 },
+
+    bomb: { radius: 15, spawnEvery: 2.2, maxCount: 5, baseVX: -180, baseVY: 80, jitterA: 120, color: '#e53935' },
+
+    fire: { burstCount: 14, speed: 520, spreadRad: 0.22, ttl: 0.7, radius: 8, cooldown: 0.6 },
+
+    power: { chargeTime: 30, duration: 30 } // 30s nạp → 30s xuyên cột
+  };
+
+  // ===== State =====
+  const STATE = { READY:'ready', RUNNING:'running', PAUSED:'paused', OVER:'over' };
+  let gameState = STATE.READY;
+
+  const HS_KEY = 'flappy_dragon_playable_high';
+  let highScore = Number(localStorage.getItem(HS_KEY) || 0);
+  let newRecord = false;
+
+  const dragon = { x: canvas.width * 0.2, y: canvas.height * 0.4, vy: 0, angle: 0, flapT: 0 };
+
+  // Va chạm khớp emoji
+  const COLLISION_R = Math.max(6, parseInt(getComputedStyle(document.documentElement).getPropertyValue('--icon-size')) * 0.4 - 3);
+
+  // Danh sách đối tượng
+  let pipes = [];    // { x, baseGapY, passed, osc:{amp,speed,phase,drift} }
+  let bombs = [];    // { x,y,r,vx,vy }
+  let fires = [];    // { x,y,vx,vy,r,ttl }
+
+  // Time
+  let lastTs = performance.now();
+  let lastPipeSpawn = 0;
+  let lastBombSpawn = 0;
+  let fireCooldown = 0;
+
+  // Điểm & Power
+  let score = 0;
+  let powerCharge = 0;
+  let powerTimeLeft = 0;
+
+  // ===== ĐẶT TRANSFORM BAN ĐẦU CHO EMOJI (tránh góc 0,0) =====
+  function setEmojiTransform() {
+    const t = `translate(${dragon.x}px, ${dragon.y}px) translate(-50%, -50%) rotate(0deg)`;
+    emojiEl.style.transform = t;
+    glowEl.style.transform  = `translate(${dragon.x}px, ${dragon.y}px) translate(-50%, -50%)`;
+  }
+  setEmojiTransform();
+
+  // ===== Utils =====
+  const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+  function circleRectCollide(cx, cy, r, rx, ry, rw, rh) {
+    const nx = clamp(cx, rx, rx + rw);
+    const ny = clamp(cy, ry, ry + rh);
+    const dx = cx - nx, dy = cy - ny;
+    return (dx*dx + dy*dy) < r*r;
+  }
+  function circleCircleCollide(x1,y1,r1,x2,y2,r2) {
+    const dx = x1-x2, dy = y1-y2;
+    return (dx*dx + dy*dy) < (r1+r2)*(r1+r2);
+  }
+
+  // ===== Điều khiển =====
+  function flap() {
+    if (gameState === STATE.READY) startGame();
+    else if (gameState === STATE.RUNNING) { dragon.vy = -CFG.flapImpulse; dragon.flapT = 0; }
+    else if (gameState === STATE.OVER) startGame();
+  }
+  function startGame() {
+    gameState = STATE.RUNNING;
+    dragon.x = canvas.width * 0.28; dragon.y = canvas.height * 0.5;
+    dragon.vy = 0; dragon.flapT = 0; dragon.angle = 0;
+    pipes = []; bombs = []; fires = [];
+    lastPipeSpawn = 0; lastBombSpawn = 0; fireCooldown = 0;
+    score = 0; newRecord = false;
+    powerCharge = 0; powerTimeLeft = 0;
+    glowEl.style.display = 'none';
+    setEmojiTransform();
+  }
+  function pauseToggle() {
+    if (gameState === STATE.RUNNING) gameState = STATE.PAUSED;
+    else if (gameState === STATE.PAUSED) gameState = STATE.RUNNING;
+  }
+  function breatheFire() {
+    if (gameState !== STATE.RUNNING) return;
+    if (fireCooldown > 0) return;
+    fireCooldown = CFG.fire.cooldown;
+    const baseAngle = 0; // phun ngang sang phải
+    for (let i = 0; i < CFG.fire.burstCount; i++) {
+      const ang = baseAngle + (Math.random() - 0.5) * CFG.fire.spreadRad * 2;
+      const vx = Math.cos(ang) * CFG.fire.speed;
+      const vy = Math.sin(ang) * CFG.fire.speed * 0.4;
+      fires.push({ x: dragon.x + COLLISION_R*0.6, y: dragon.y, vx, vy, r: CFG.fire.radius, ttl: CFG.fire.ttl });
+    }
+  }
+
+  // Nút bấm (nếu phím không hoạt động)
+  btnStart.addEventListener('click', startGame);
+  btnFlap .addEventListener('click', flap);
+  btnFire .addEventListener('click', breatheFire);
+  btnPause.addEventListener('click', pauseToggle);
+
+  // Chuột/chạm
+  window.addEventListener('mousedown', flap);
+  window.addEventListener('touchstart', flap, {passive:true});
+
+  // Phím — lắng nghe cả document & window, preventDefault cho Space/ArrowUp
+  function onKeyDown(e) {
+    if (e.code === 'Space' || e.code === 'ArrowUp') { e.preventDefault(); flap(); }
+    else if (e.code === 'Enter') { e.preventDefault(); startGame(); }
+    else if ((e.key||'').toLowerCase() === 'p') { e.preventDefault(); pauseToggle(); }
+    else if ((e.key||'').toLowerCase() === 'f') { e.preventDefault(); breatheFire(); }
+  }
+  document.addEventListener('keydown', onKeyDown);
+  window.addEventListener('keydown', onKeyDown);
+
+  // ===== Spawns =====
+  function spawnPipePair() {
+    const H = canvas.height - CFG.groundH, margin = 60;
+    const minY = margin + CFG.pipeGap * 0.5, maxY = H - margin - CFG.pipeGap * 0.5;
+    const baseGapY = Math.random() * (maxY - minY) + minY;
+    pipes.push({
+      x: canvas.width + CFG.pipeWidth,
+      baseGapY, passed: false,
+      osc: {
+        amp: CFG.osc.ampMin + Math.random()*(CFG.osc.ampMax-CFG.osc.ampMin),
+        speed: CFG.osc.speedMin + Math.random()*(CFG.osc.speedMax-CFG.osc.speedMin),
+        phase: Math.random() * Math.PI*2,
+        drift: (Math.random() - 0.5) * CFG.osc.driftMax
+      }
+    });
+  }
+  function spawnBomb() {
+    if (bombs.length >= CFG.bomb.maxCount) return;
+    const H = canvas.height - CFG.groundH;
+    const y = Math.random() * (H - 120) + 60;
+    const vx = CFG.bomb.baseVX * (0.8 + Math.random()*0.4);
+    const vy = (Math.random() < 0.5 ? 1 : -1) * (CFG.bomb.baseVY * (0.6 + Math.random()*0.8));
+    bombs.push({ x: canvas.width + 50, y, r: CFG.bomb.radius, vx, vy });
+  }
+
+  // ===== Update =====
+  function update(dt) {
+    if (gameState !== STATE.RUNNING) return;
+
+    // Power mode
+    powerCharge += dt;
+    if (powerTimeLeft > 0) powerTimeLeft -= dt;
+    if (powerTimeLeft <= 0 && powerCharge >= CFG.power.chargeTime) {
+      powerTimeLeft = CFG.power.duration; powerCharge = 0;
+      glowEl.style.display = 'block';
+    }
+    if (powerTimeLeft <= 0) glowEl.style.display = 'none';
+
+    if (fireCooldown > 0) fireCooldown -= dt;
+
+    const speed = CFG.pipeSpeed + Math.min(160, score * 3); // khó dần
+
+    // Vật lý rồng
+    dragon.vy += CFG.gravity * dt;
+    dragon.y  += dragon.vy * dt;
+    dragon.flapT += dt;
+    dragon.angle = clamp(dragon.vy / 700, -0.55, 0.85);
+
+    // Trần an toàn (không chết)
+    const TOP_SAFE = CFG.topSafeMargin + COLLISION_R;
+    if (dragon.y - COLLISION_R < CFG.topSafeMargin) {
+      dragon.y = TOP_SAFE;
+      if (dragon.vy < 0) dragon.vy *= -0.3; // phản lực nhẹ xuống
+    }
+
+    // Spawns
+    lastPipeSpawn += dt;
+    if (lastPipeSpawn >= CFG.pipeInterval) { lastPipeSpawn = 0; spawnPipePair(); }
+    lastBombSpawn += dt;
+    if (lastBombSpawn >= CFG.bomb.spawnEvery) { lastBombSpawn = 0; spawnBomb(); }
+
+    const H = canvas.height - CFG.groundH;
+
+    // Ống (lượn dọc)
+    for (let p of pipes) {
+      p.x -= speed * dt;
+      p.osc.phase += (p.osc.speed + p.osc.drift) * dt;
+      const yOffset = Math.sin(p.osc.phase) * p.osc.amp;
+      const gapY = clamp(p.baseGapY + yOffset, CFG.pipeGap*0.5 + 30, H - CFG.pipeGap*0.5 - 30);
+
+      const topRect = { x: p.x, y: 0, w: CFG.pipeWidth, h: gapY - CFG.pipeGap/2 };
+      const botRect = { x: p.x, y: gapY + CFG.pipeGap/2, w: CFG.pipeWidth, h: H - (gapY + CFG.pipeGap/2) };
+
+      // Xuyên cột khi Power ON
+      if (powerTimeLeft <= 0) {
+        if (circleRectCollide(dragon.x, dragon.y, COLLISION_R, topRect.x, topRect.y, topRect.w, topRect.h) ||
+            circleRectCollide(dragon.x, dragon.y, COLLISION_R, botRect.x, botRect.y, botRect.w, botRect.h)) {
+          endGame(); return;
+        }
+      }
+
+      if (!p.passed && p.x + CFG.pipeWidth < dragon.x) { p.passed = true; score += 1; }
+    }
+    pipes = pipes.filter(p => p.x + CFG.pipeWidth > -10);
+
+    // Bom
+    for (let b of bombs) {
+      b.x += b.vx * dt; b.y += b.vy * dt;
+      // Jitter khó lường
+      b.vx += (Math.random()-0.5) * CFG.bomb.jitterA * dt * 0.15;
+      b.vy += (Math.random()-0.5) * CFG.bomb.jitterA * dt * 0.25;
+
+      const topBound = CFG.topSafeMargin + 20, botBound = H - 40;
+      if (b.y < topBound && b.vy < 0) b.vy *= -0.8;
+      if (b.y > botBound && b.vy > 0) b.vy *= -0.8;
+
+      // Bom luôn nguy hiểm (kể cả khi Power ON)
+      if (circleCircleCollide(dragon.x, dragon.y, COLLISION_R*0.95, b.x, b.y, b.r)) {
+        endGame(); return;
+      }
+    }
+    bombs = bombs.filter(b => b.x + b.r > -20);
+
+    // Lửa
+    for (let f of fires) { f.x += f.vx * dt; f.y += f.vy * dt; f.ttl -= dt; }
+    // Lửa phá bom
+    for (let i = bombs.length - 1; i >= 0; i--) {
+      const b = bombs[i]; let destroyed = false;
+      for (let j = fires.length - 1; j >= 0; j--) {
+        const f = fires[j];
+        if (circleCircleCollide(f.x, f.y, f.r, b.x, b.y, b.r)) {
+          destroyed = true; fires.splice(j,1); break;
+        }
+      }
+      if (destroyed) bombs.splice(i,1);
+    }
+    fires = fires.filter(f => f.ttl > 0 && f.x < canvas.width + 200);
+
+    // Chạm đất → thua
+    if (dragon.y + COLLISION_R > H) endGame();
+  }
+
+  // ===== Draw =====
+  function drawBackground() {
+    const W = canvas.width, H = canvas.height;
+    ctx.fillStyle = 'rgba(255,255,255,0.75)';
+    for (let i = 0; i < 5; i++) {
+      const x = (Date.now()/45 + i*220) % (W+220) - 110;
+      const y = 80 + i * 46;
+      ctx.beginPath(); ctx.ellipse(x, y, 60, 24, 0, 0, Math.PI*2);
+      ctx.ellipse(x+40, y+10, 46, 18, 0, 0, Math.PI*2);
+      ctx.ellipse(x-40, y+8, 36, 16, 0, 0, Math.PI*2);
+      ctx.fill();
+    }
+    // Đất
+    ctx.fillStyle = '#4caf50';
+    ctx.fillRect(0, H - CFG.groundH, W, CFG.groundH);
+    ctx.fillStyle = '#43a047';
+    for (let x = 0; x < W; x += 24) ctx.fillRect(x, H - CFG.groundH, 12, CFG.groundH);
+  }
+
+  function drawPipes() {
+    const H = canvas.height - CFG.groundH;
+    for (let p of pipes) {
+      const yOffset = Math.sin(p.osc.phase) * p.osc.amp;
+      const gapY = clamp(p.baseGapY + yOffset, CFG.pipeGap*0.5 + 30, H - CFG.pipeGap*0.5 - 30);
+
+      const topH = gapY - CFG.pipeGap/2;
+      const botY = gapY + CFG.pipeGap/2;
+      const botH = H - botY;
+
+      ctx.fillStyle = '#7cb342';
+      ctx.fillRect(p.x, 0, CFG.pipeWidth, topH);
+      ctx.fillRect(p.x, botY, CFG.pipeWidth, botH);
+
+      ctx.fillStyle = '#689f38';
+      ctx.fillRect(p.x - 2, topH - 10, CFG.pipeWidth + 4, 10);
+      ctx.fillRect(p.x - 2, botY,        CFG.pipeWidth + 4, 10);
+
+      ctx.strokeStyle = 'rgba(0,0,0,0.2)'; ctx.lineWidth = 1;
+      ctx.strokeRect(p.x, 0, CFG.pipeWidth, topH);
+      ctx.strokeRect(p.x, botY, CFG.pipeWidth, botH);
+    }
+  }
+
+  function drawBombs() {
+    ctx.strokeStyle = 'rgba(0,0,0,0.35)'; ctx.lineWidth = 2;
+    for (let b of bombs) {
+      ctx.fillStyle = CFG.bomb.color;
+      ctx.beginPath(); ctx.arc(b.x, b.y, b.r, 0, Math.PI*2); ctx.fill(); ctx.stroke();
+      for (let k = 0; k < 8; k++) {
+        const ang = k * Math.PI/4;
+        const x1 = b.x + Math.cos(ang) * (b.r - 4);
+        const y1 = b.y + Math.sin(ang) * (b.r - 4);
+        const x2 = b.x + Math.cos(ang) * (b.r + 8);
+        const y2 = b.y + Math.sin(ang) * (b.r + 8);
+        ctx.beginPath(); ctx.moveTo(x1,y1); ctx.lineTo(x2,y2); ctx.stroke();
+      }
+    }
+  }
+
+  function drawFire() {
+    for (let f of fires) {
+      const grd = ctx.createRadialGradient(f.x, f.y, 0, f.x, f.y, f.r);
+      grd.addColorStop(0, 'rgba(255, 200, 0, 0.9)');
+      grd.addColorStop(0.5, 'rgba(255, 120, 0, 0.8)');
+      grd.addColorStop(1, 'rgba(255, 60, 0, 0.0)');
+      ctx.fillStyle = grd;
+      ctx.beginPath(); ctx.arc(f.x, f.y, f.r, 0, Math.PI*2); ctx.fill();
+    }
+  }
+
+  function drawUI() {
+    ctx.fillStyle = '#0b3a52';
+    ctx.textAlign = 'left';
+    ctx.font = 'bold 26px system-ui, Segoe UI, Roboto, sans-serif';
+    ctx.fillText(`Điểm: ${score}`, 16, 16);
+    ctx.font = 'bold 18px system-ui, Segoe UI, Roboto, sans-serif';
+    ctx.fillText(`Kỷ lục: ${highScore}`, 16, 46);
+
+    // Power HUD
+    ctx.font = 'bold 16px system-ui, Segoe UI, Roboto, sans-serif';
+    if (powerTimeLeft > 0) {
+      ctx.fillStyle = '#e53935';
+      ctx.fillText(`POWER: ${Math.ceil(powerTimeLeft)}s (xuyên cột)`, 16, 72);
+    } else {
+      const pct = Math.min(100, Math.floor(powerCharge / CFG.power.chargeTime * 100));
+      ctx.fillStyle = '#0b3a52';
+      ctx.fillText(`Năng lượng: ${pct}%`, 16, 72);
+    }
+
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'top';
+    ctx.font = 'bold 28px system-ui, Segoe UI, Roboto, sans-serif';
+    if (gameState === STATE.READY)
+      ctx.fillText('Nhấn Space/↑ hoặc chạm để bắt đầu (hoặc nút Start)', canvas.width/2, canvas.height*0.35);
+    if (gameState === STATE.PAUSED)
+      ctx.fillText('Tạm dừng — nhấn P hoặc nút Pause để tiếp tục', canvas.width/2, canvas.height*0.35);
+    if (gameState === STATE.OVER) {
+      ctx.fillText('Thua rồi! Nhấn Enter/Start để chơi lại', canvas.width/2, canvas.height*0.35);
+      if (newRecord) {
+        ctx.fillStyle = '#e53935';
+        ctx.font = 'bold 24px system-ui, Segoe UI, Roboto, sans-serif';
+        ctx.fillText('🎉 Kỷ lục mới!', canvas.width/2, canvas.height*0.35 + 40);
+      }
+    }
+  }
+
+  // ===== Game Loop =====
+  function frame() {
+    try {
+      const now = performance.now();
+      let dt = (now - lastTs) / 1000;
+      lastTs = now;
+      dt = Math.min(dt, 0.033);
+
+      if (gameState === STATE.RUNNING) update(dt);
+
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      drawBackground();
+      drawPipes();
+      drawBombs();
+      drawFire();
+      drawUI();
+
+      // Emoji position & glow
+      const wobble = Math.sin(dragon.flapT * 2.2 * Math.PI) * 5;
+      const angleDeg = dragon.angle * 180 / Math.PI;
+      const t = `translate(${dragon.x}px, ${dragon.y + wobble}px) translate(-50%, -50%) rotate(${angleDeg}deg)`;
+      emojiEl.style.transform = t;
+      if (powerTimeLeft > 0) {
+        glowEl.style.display = 'block';
+        glowEl.style.transform = `translate(${dragon.x}px, ${dragon.y}px) translate(-50%, -50%)`;
+      } else {
+        glowEl.style.display = 'none';
+      }
+
+      requestAnimationFrame(frame);
+    } catch (e) {
+      // Hiển thị lỗi nếu có (giúp debug trên editor)
+      errEl.textContent = 'Lỗi: ' + (e && e.message ? e.message : e);
+      errEl.style.display = 'block';
+      console.error(e);
+      requestAnimationFrame(frame);
+    }
+  }
+
+  function endGame() {
+    gameState = STATE.OVER;
+    glowEl.style.display = 'none';
+    if (score > highScore) { highScore = score; newRecord = true; localStorage.setItem(HS_KEY, String(highScore)); }
+  }
+
+  // Khởi động vòng lặp
+  frame();
+
+  // Tự focus và đảm bảo emoji không  // Tự focus và đảm bảo emoji không nằm (0,0)
+  setTimeout(() => { document.body.focus(); setEmojiTransform(); }, 50);
+})();
+</script>
+</body>
